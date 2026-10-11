@@ -41,7 +41,7 @@ npm run test:browser   # speltest in een echte browser (Chromium)
 |---|---|
 | `js/data.js` | Alle speldata en balansgetallen: steden, wegen, trucks, vracht, upgrades, doelen |
 | `js/logic.js` | Spellogica zonder DOM (routes, ritten, kosten, vrachtbeurs, gebeurtenissen, opslaan), getest in Node |
-| `js/ui.js` | Kaart (SVG), panelen, modals, invoer en de game loop |
+| `js/ui.js` | Kaart (SVG), paneel, meldingen, invoer en de game loop |
 | `js/util.js` | Kleine hulpfuncties (opmaak, toeval) |
 | `tests/` | `logic.test.mjs` (unit tests) en `browser.mjs` (speltest in Chromium) |
 
