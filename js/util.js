@@ -29,5 +29,5 @@ export function fmtDur(h) {
 export function fmtClock(t) {
   const day = Math.floor(t / 24) + 1;
   const m = Math.floor((t % 24) * 60);
-  return `Dag ${day} · ${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  return `Dag ${day}, ${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }

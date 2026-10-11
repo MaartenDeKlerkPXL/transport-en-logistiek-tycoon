@@ -176,3 +176,31 @@ test('doelen geven een beloning', () => {
   assert.ok(L.S.goalsDone.includes('g1'));
   assert.equal(L.S.money, m + 2000);
 });
+
+test('rit annuleren: opdracht terug op de beurs, truck rijdt leeg door en staat dan klaar', () => {
+  const t = L.S.trucks[0];
+  const c = contract('gent', 'brussel');
+  L.assign(t, c);
+  L.tick(0.1);
+  assert.ok(L.cancelJob(t));
+  assert.equal(t.job, null);
+  assert.ok(L.S.contracts.some(x => x.id === c.id), 'opdracht staat terug op de beurs');
+  assert.ok(runUntil(() => t.state === 'idle'));
+  assert.equal(t.city, 'gent');
+  assert.equal(L.cancelJob(t), false, 'niets te annuleren als de truck klaarstaat');
+});
+
+test('winst per dag verschijnt na één speldag', () => {
+  assert.equal(L.profitPerDay(), null);
+  for (let i = 0; i < 260; i++) L.tick(0.1);
+  assert.equal(typeof L.profitPerDay(), 'number');
+});
+
+test('geen flitsboetes: je rijdt niet zelf', () => {
+  L.assign(L.S.trucks[0], contract('antwerpen', 'parijs'));
+  for (let i = 0; i < 300; i++) {
+    L.S.nextEventAt = L.S.time;
+    L.tick(0.01);
+  }
+  assert.ok(!L.S.log.some(e => /boete/i.test(e.text)));
+});

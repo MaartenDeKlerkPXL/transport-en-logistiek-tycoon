@@ -86,7 +86,7 @@ export function defaults() {
     events: [], log: [], goalsDone: [], visited: { antwerpen: true },
     stats: { deliveries: 0, income: 0, costs: 0, km: 0, late: 0 },
     nextContractAt: 6, nextEventAt: 18, nextDieselAt: 7, nextDispatchAt: 0,
-    nextId: 1, savedAt: Date.now(), introSeen: false,
+    nextId: 1, savedAt: Date.now(), introSeen: false, netHistory: [],
   };
 }
 
@@ -109,6 +109,13 @@ export const depotPrice = () => DEPOT_BASE_PRICE * Math.pow(2, S.depots.length -
 export const boardMax = () => 7 + S.depots.length * 3 + (up('beurs') ? 5 : 0);
 export const xpNeeded = l => Math.round(100 * Math.pow(1.7, l - 1));
 export const payoutFor = (c, late = false) => c.payout * (up('track') ? 1.1 : 1) * (late ? LATE_FACTOR : 1);
+
+// Winst (omzet − kosten) over de laatste 24 speluren, of null zolang er nog geen dag voorbij is.
+export function profitPerDay() {
+  const h = S.netHistory;
+  if (h.length < 25) return null;
+  return h[h.length - 1] - h[0];
+}
 
 export function companyValue() {
   if (!S) return 0;
@@ -196,6 +203,18 @@ export function assign(t, c) {
   return true;
 }
 
+// Rit annuleren zolang de truck nog leeg naar het ophaalpunt rijdt. De opdracht gaat terug naar de beurs.
+export function cancelJob(t) {
+  if (t.state !== 'toPickup' || !t.job) return false;
+  const { cost, startedAt, ...c } = t.job;
+  if (c.expires > S.time) S.contracts.push(c);
+  log(`↩️ Rit van ${t.plate} geannuleerd. ${t.driver} rijdt door naar ${cityName(c.from)}.`);
+  t.job = null;
+  t.state = 'reposition';
+  hooks.changed();
+  return true;
+}
+
 function startLoading(t) {
   t.state = 'loading';
   t.timer = CARGO[t.job.cargo].loadH;
@@ -220,6 +239,7 @@ function updateTruck(t, dt) {
       break;
     case 'toPickup':
     case 'delivering':
+    case 'reposition':
       drive(t, dt);
       break;
     case 'loading':
@@ -273,7 +293,8 @@ function drive(t, dt) {
 function arrive(t) {
   t.city = t.route.path[t.route.path.length - 1];
   t.route = null;
-  if (t.state === 'toPickup') startLoading(t);
+  if (t.state === 'reposition') t.state = 'idle';
+  else if (t.state === 'toPickup') startLoading(t);
   else { t.state = 'unloading'; t.timer = CARGO[t.job.cargo].loadH; }
   hooks.changed();
 }
@@ -358,13 +379,6 @@ const EVENT_DEFS = [
   { w: 1.5, make: () => ({ icon: '🌡️', title: 'Hittegolf!', desc: 'Nieuwe koelvracht betaalt 50% meer.', dur: 24, boost: { koel: 1.5 } }) },
   { w: 1.5, make: () => ({ icon: '🛍️', title: 'Black Friday-piek', desc: 'Nieuwe pakketvracht betaalt 40% meer.', dur: 24, boost: { pakketten: 1.4 } }) },
   { w: 1, make: () => ({ icon: '🏗️', title: 'Bouwboom', desc: 'Nieuwe bulkvracht betaalt 40% meer.', dur: 24, boost: { bulk: 1.4 } }) },
-  { w: 1.5, make: () => {
-    const driving = S.trucks.filter(t => t.state === 'delivering' || t.state === 'toPickup');
-    if (!driving.length) return null;
-    const t = pick(driving); const fine = randInt(15, 45) * 10;
-    spend(fine, t);
-    return { icon: '📸', title: `Flitsboete voor ${t.plate}`, desc: `${t.driver} reed te snel: ${fmtMoney(fine)} boete.` };
-  } },
   { w: 1, make: () => { const b = Math.round(1500 * S.level / 100) * 100; S.money += b; return { icon: '🏛️', title: 'Vergroeningspremie', desc: `De overheid steunt je vloot met ${fmtMoney(b)}.` }; } },
 ];
 
@@ -399,6 +413,8 @@ export function tick(dt) {
   while (S.time >= S.nextDieselAt) {
     S.diesel = clamp(S.diesel + (1.75 - S.diesel) * 0.05 + rand(-0.03, 0.03), 1.35, 2.6);
     S.nextDieselAt += 1;
+    S.netHistory.push(S.stats.income - S.stats.costs);
+    if (S.netHistory.length > 25) S.netHistory.shift();
   }
 
   if (S.time >= S.nextContractAt) {

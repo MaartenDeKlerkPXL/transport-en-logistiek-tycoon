@@ -1,14 +1,28 @@
-// Vrachtbaas — alles wat je ziet: kaart (SVG), panelen, modals en invoer.
+// Vrachtbaas — alles wat je ziet: kaart (SVG), paneel, meldingen en invoer.
+// Huisregel: geen pop-ups. Keuzes klappen open in hun kaart, bevestigen gebeurt met een tweestapsknop.
 import { CITIES, ROADS, TRUCK_TYPES, CARGO, UPGRADES, COAST, LAKES, BORDERS, COUNTRY_LABELS } from './data.js';
 import { clamp, esc, fmtMoney, fmtKm, fmtDur, fmtClock, fmtWeight } from './util.js';
 import * as L from './logic.js';
 import { S, hooks, cityName, route, ADJ, START_MONEY, MAX_OFFLINE_MS } from './logic.js';
 
-let dirty = true;
-let activeTab = 'vracht';
-let buyCity = null;
-let pointerDown = false;
 const $ = (sel, el = document) => el.querySelector(sel);
+const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// UI-toestand (wordt niet opgeslagen)
+const ui = {
+  dirty: true,
+  tab: 'vracht',
+  open: null,            // { kind: 'contract' | 'truck', id } — opengeklapte kaart
+  filter: 'all',         // vrachtbeurs: 'all' of 'fits'
+  city: null,            // opengeklapte stad in Netwerk
+  confirm: null,         // { key, until } — tweestapsknop die 'gewapend' is
+  banner: null,          // samenvatting na terugkeer
+  buyCity: null,
+  pointerDown: false,
+  focusAfter: null,      // selector die na het tekenen focus krijgt
+  scrollTo: null,        // selector die na het tekenen in beeld moet
+  animate: false,        // uitklappaneel net geopend: één keer animeren
+};
 
 // Kaartprojectie (equirectangulair, gecorrigeerd voor breedtegraad)
 const BOUNDS = { lonMin: 1.9, lonMax: 7.5, latMin: 48.6, latMax: 52.75 };
@@ -19,6 +33,30 @@ const MAP_H = (BOUNDS.latMax - BOUNDS.latMin) * SCALE;
 const proj = (lat, lon) => [(lon - BOUNDS.lonMin) * KX * SCALE, (BOUNDS.latMax - lat) * SCALE];
 const cityXY = id => proj(CITIES[id].lat, CITIES[id].lon);
 
+const TRUCK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#ico-truck"/></svg>';
+
+// ---------- kleine bouwstenen ----------------------------------------------
+const dataAttrs = o => Object.entries(o).filter(([, v]) => v !== undefined && v !== null).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
+
+function button(label, data, { cls = '', disabled = false, aria, expanded, title } = {}) {
+  return `<button type="button" class="btn ${cls}"${dataAttrs(data)}${disabled ? ' disabled' : ''}`
+    + `${aria ? ` aria-label="${esc(aria)}"` : ''}${expanded !== undefined ? ` aria-expanded="${expanded}"` : ''}`
+    + `${title ? ` title="${esc(title)}"` : ''}>${label}</button>`;
+}
+
+// Tweestapsknop: eerst 'Verkopen', daarna 5 seconden lang 'Ja, verkopen' + 'Nee'.
+function confirmButton(key, label, confirmLabel, data) {
+  if (ui.confirm && ui.confirm.key === key && performance.now() < ui.confirm.until) {
+    return button(confirmLabel, { ...data, 'confirm-of': key }, { cls: 'danger small' })
+      + button('Nee', { action: 'disarm' }, { cls: 'quiet small' });
+  }
+  return button(label, { action: 'arm', key }, { cls: 'quiet small' });
+}
+
+const shortBy = amount => `Nog ${fmtMoney(amount - S.money)} tekort`;
+const fitsType = (T, c) => T.cargo.includes(c.cargo) && T.capacity >= c.weight;
+const isOpen = (kind, id) => ui.open && ui.open.kind === kind && ui.open.id === id;
+
 // ---------- kaart -----------------------------------------------------------
 const SVGNS = 'http://www.w3.org/2000/svg';
 const truckEls = new Map();
@@ -27,25 +65,27 @@ function renderMap() {
   const svg = $('#map');
   svg.setAttribute('viewBox', `0 0 ${MAP_W.toFixed(0)} ${MAP_H.toFixed(0)}`);
   const pts = arr => arr.map(([la, lo]) => proj(la, lo).map(v => v.toFixed(1)).join(',')).join(' ');
-  let h = `<rect class="land" x="${-MAP_W}" y="${-MAP_H}" width="${MAP_W * 3}" height="${MAP_H * 3}"/>`;
+  let h = `<defs><symbol id="ico-truck" viewBox="0 0 24 24"><path d="M1.5 5.5h12v10h-12z"/><path d="M14.5 8.5h4.2l3.8 4.3v2.7h-8z"/><circle cx="6" cy="17.5" r="2.2"/><circle cx="17.5" cy="17.5" r="2.2"/></symbol></defs>`;
+  // land en zee lopen ruim buiten de kaartgrenzen door: brede schermen tonen meer dan de viewBox
+  h += `<rect class="land" x="${-MAP_W}" y="${-MAP_H}" width="${MAP_W * 3}" height="${MAP_H * 3}"/>`;
   h += `<polygon class="sea" points="${pts(COAST)}"/>`;
   for (const l of LAKES) h += `<polygon class="sea" points="${pts(l)}"/>`;
   for (const b of BORDERS) h += `<polyline class="border" points="${pts(b)}"/>`;
   for (const c of COUNTRY_LABELS) {
     const [x, y] = proj(c.lat, c.lon);
-    h += `<text class="country${c.sea ? ' sea-label' : ''}" x="${x}" y="${y}">${c.text}</text>`;
+    h += `<text class="country${c.sea ? ' sea-label' : ''}" x="${x}" y="${y}" aria-hidden="true">${c.text}</text>`;
   }
-  h += '<g id="roads">';
-  for (const [a, b] of ROADS) {
+  const lines = cls => ROADS.map(([a, b]) => {
     const [x1, y1] = cityXY(a), [x2, y2] = cityXY(b);
-    h += `<line class="road" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
-  }
+    return `<line class="${cls}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+  }).join('');
+  h += `<g aria-hidden="true">${lines('road-casing')}${lines('road')}`;
   for (const [a, b, road] of ROADS) {
     const [x1, y1] = cityXY(a), [x2, y2] = cityXY(b);
-    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2, w = road.length * 5 + 6;
-    h += `<g class="road-label" transform="translate(${mx.toFixed(1)},${my.toFixed(1)})"><rect x="${-w / 2}" y="-6" width="${w}" height="12" rx="3"/><text y="3">${road}</text></g>`;
+    const w = road.length * 5.4 + 7;
+    h += `<g class="shield ${road[0] === 'E' ? 'e' : 'a'}" transform="translate(${((x1 + x2) / 2).toFixed(1)},${((y1 + y2) / 2).toFixed(1)})"><rect x="${-w / 2}" y="-6.5" width="${w}" height="13" rx="3"/><text y="3">${road}</text></g>`;
   }
-  h += '</g><g id="route-hl"></g><g id="cities"></g><g id="trucks"></g><g id="fx"></g>';
+  h += '</g><g id="route-hl" aria-hidden="true"></g><g id="cities"></g><g id="trucks"></g><g id="fx" aria-hidden="true"></g>';
   svg.innerHTML = h;
 }
 
@@ -57,11 +97,13 @@ function renderCities() {
     const [x, y] = cityXY(id);
     const depot = S.depots.includes(id);
     const cls = depot ? 'depot' : net.has(id) ? 'net' : 'off';
-    const off = { r: [9, 4, 'start'], l: [-9, 4, 'end'], t: [0, -10, 'middle'], b: [0, 16, 'middle'] }[c.lp || 'r'];
-    h += `<g class="city ${cls}" data-action="city" data-id="${id}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">`;
-    h += depot ? '<rect x="-7" y="-7" width="14" height="14" rx="3"/>' : '<circle r="5"/>';
-    if (c.port) h += `<text class="port" x="${c.lp === 't' ? 10 : 0}" y="${c.lp === 't' ? 4 : -9}" text-anchor="middle">⚓</text>`;
-    h += `<text class="name" x="${off[0]}" y="${off[1]}" text-anchor="${off[2]}">${c.name}</text></g>`;
+    const label = `${c.name}: ${depot ? 'depot' : net.has(id) ? 'in je netwerk' : 'buiten je netwerk'}. Toon details`;
+    const off = { r: [10, 4, 'start'], l: [-10, 4, 'end'], t: [0, -11, 'middle'], b: [0, 18, 'middle'] }[c.lp || 'r'];
+    h += `<g class="city ${cls}${ui.tab === 'netwerk' && ui.city === id ? ' sel' : ''}" data-action="city" data-id="${id}" role="button" tabindex="0" aria-label="${esc(label)}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">`;
+    h += '<circle class="halo" r="12"/>';
+    h += depot ? '<rect class="depot" x="-7" y="-7" width="14" height="14" rx="3"/>' : '<circle r="5"/>';
+    if (c.port) h += `<text class="port" x="${c.lp === 't' ? 12 : 0}" y="${c.lp === 't' ? 4 : -10}" text-anchor="middle" aria-hidden="true">⚓</text>`;
+    h += `<text class="name" x="${off[0]}" y="${off[1]}" text-anchor="${off[2]}" aria-hidden="true">${c.name}</text></g>`;
   }
   $('#cities').innerHTML = h;
 }
@@ -75,7 +117,7 @@ function truckXY(t, slot) {
   }
   // stilstaande trucks in een kringetje rond de stad
   const [x, y] = cityXY(t.city);
-  const ang = slot * 0.9 + Math.PI, rad = 15 + Math.floor(slot / 7) * 9;
+  const ang = slot * 0.9 + Math.PI, rad = 17 + Math.floor(slot / 7) * 10;
   return [x + Math.sin(ang) * rad, y - Math.cos(ang) * rad];
 }
 
@@ -89,7 +131,10 @@ function drawTrucks() {
     if (!el) {
       el = document.createElementNS(SVGNS, 'g');
       el.setAttribute('class', 'truck');
-      el.innerHTML = `<circle r="7" fill="${TRUCK_TYPES[t.type].color}"/><text y="3.5">${TRUCK_TYPES[t.type].icon}</text><title></title>`;
+      el.dataset.action = 'truck';
+      el.dataset.id = t.id;
+      el.style.cursor = 'pointer';
+      el.innerHTML = `<circle r="8.5" fill="${TRUCK_TYPES[t.type].color}"/><use href="#ico-truck" x="-5.5" y="-5.5" width="11" height="11"/><title></title>`;
       g.appendChild(el);
       truckEls.set(t.id, el);
     }
@@ -99,7 +144,7 @@ function drawTrucks() {
     el.setAttribute('transform', `translate(${x.toFixed(1)},${y.toFixed(1)})`);
     el.classList.toggle('alert', t.state === 'broken' || t.state === 'resting');
     el.classList.toggle('idle', t.state === 'idle');
-    el.lastChild.textContent = `${t.plate} — ${statusText(t)}`;
+    el.lastChild.textContent = `${t.plate}: ${statusText(t)}`;
   }
   for (const [id, el] of truckEls) if (!seen.has(id)) { el.remove(); truckEls.delete(id); }
 }
@@ -108,13 +153,10 @@ function highlightRoute(from, to, via) {
   let h = '';
   const draw = (a, b, cls) => {
     const r = route(a, b);
-    if (!r.segs.length) return;
-    h += `<polyline class="${cls}" points="${r.path.map(id => cityXY(id).map(v => v.toFixed(1)).join(',')).join(' ')}"/>`;
+    if (r.segs.length) h += `<polyline class="${cls}" points="${r.path.map(id => cityXY(id).map(v => v.toFixed(1)).join(',')).join(' ')}"/>`;
   };
   if (via && via !== from) draw(via, from, 'hl-empty');
-  draw(from, to, 'hl-loaded');
-  const [x, y] = cityXY(from);
-  if (from === to) h += `<circle class="hl-city" cx="${x}" cy="${y}" r="13"/>`;
+  if (from !== to) draw(from, to, 'hl-loaded');
   $('#route-hl').innerHTML = h;
 }
 const clearRoute = () => { $('#route-hl').innerHTML = ''; };
@@ -123,49 +165,63 @@ function floatText(city, text, cls) {
   const [x, y] = cityXY(city);
   const t = document.createElementNS(SVGNS, 'text');
   t.setAttribute('class', 'float ' + cls);
-  t.setAttribute('x', x); t.setAttribute('y', y - 12);
+  t.setAttribute('x', x); t.setAttribute('y', y - 14);
   t.textContent = text;
   $('#fx').appendChild(t);
   setTimeout(() => t.remove(), 1800);
 }
 
-// ---------- algemene UI -----------------------------------------------------
+// ---------- topbalk, gebeurtenissen, meldingen ------------------------------
 function toast(text, kind = '') {
   const box = $('#toasts');
   const el = document.createElement('div');
   el.className = 'toast ' + kind;
   el.textContent = text;
   box.appendChild(el);
-  while (box.children.length > 4) box.firstChild.remove();
-  setTimeout(() => el.classList.add('out'), 3800);
-  setTimeout(() => el.remove(), 4300);
+  while (box.children.length > 3) box.firstChild.remove();
+  setTimeout(() => el.classList.add('out'), 3600);
+  setTimeout(() => el.remove(), 4000);
 }
 
 function updateTopbar() {
-  $('#st-money').textContent = fmtMoney(S.money);
-  $('#st-money').classList.toggle('neg', S.money < 0);
+  const money = $('#st-money');
+  money.textContent = fmtMoney(S.money);
+  money.classList.toggle('neg', S.money < 0);
+  const p = L.profitPerDay();
+  const pe = $('#st-profit');
+  pe.textContent = p === null ? '—' : (p >= 0 ? '+' : '') + fmtMoney(p);
+  pe.className = p === null ? '' : p >= 0 ? 'pos' : 'neg';
+  pe.title = p === null ? 'Zichtbaar na je eerste speldag' : 'Omzet min kosten over de laatste 24 speluren';
   $('#st-level').textContent = S.level;
-  $('#st-xp').style.width = (S.xp / L.xpNeeded(S.level) * 100).toFixed(1) + '%';
+  const pct = S.xp / L.xpNeeded(S.level) * 100;
+  $('#st-xp').style.width = pct.toFixed(1) + '%';
+  $('#st-xpbar').setAttribute('aria-valuenow', Math.round(pct));
   $('#st-clock').textContent = fmtClock(S.time);
   $('#st-diesel').textContent = '€ ' + S.diesel.toFixed(2).replace('.', ',') + '/L';
-  document.querySelectorAll('#speed button').forEach(b => b.classList.toggle('on', Number(b.dataset.speed) === S.speed));
+  document.querySelectorAll('#speed button').forEach(b => {
+    const on = Number(b.dataset.speed) === S.speed;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on);
+  });
 }
 
 function renderEvents() {
   $('#events').innerHTML = S.events.map(e =>
-    `<div class="chip" title="${esc(e.desc)}">${e.icon} ${esc(e.title)} <span class="muted">· nog ${fmtDur(e.endsAt - S.time)}</span></div>`).join('');
+    `<div class="chip" title="${esc(e.desc)}"><span aria-hidden="true">${e.icon}</span> ${esc(e.title)} <span class="muted">nog ${fmtDur(e.endsAt - S.time)}</span></div>`).join('');
 }
 
+// ---------- tekst & berekeningen voor de weergave ---------------------------
 function statusText(t) {
   const j = t.job;
   switch (t.state) {
-    case 'idle': return `Staat klaar in ${cityName(t.city)}`;
-    case 'toPickup': return `Rijdt leeg naar ${cityName(j.from)}`;
+    case 'idle': return `Klaar voor vertrek in ${cityName(t.city)}`;
+    case 'toPickup': return `Rijdt leeg naar ${cityName(j.from)} om te laden`;
+    case 'reposition': return `Rijdt leeg naar ${cityName(t.route.path.at(-1))}`;
     case 'loading': return `Laadt ${CARGO[j.cargo].name.toLowerCase()} in ${cityName(t.city)}`;
-    case 'delivering': return `${CARGO[j.cargo].icon} ${fmtWeight(j.weight)} naar ${cityName(j.to)}`;
+    case 'delivering': return `Brengt ${fmtWeight(j.weight)} ${CARGO[j.cargo].name.toLowerCase()} naar ${cityName(j.to)}`;
     case 'unloading': return `Lost in ${cityName(t.city)}`;
-    case 'resting': return '😴 Verplichte rust (tachograaf)';
-    case 'broken': return '🛠️ Pech — wacht op takeldienst';
+    case 'resting': return 'Verplichte rust na 9 uur rijden (tachograaf)';
+    case 'broken': return 'Pech onderweg, wacht op de takeldienst';
   }
   return '';
 }
@@ -178,168 +234,330 @@ function truckProgress(t) {
   return 0;
 }
 
+const byBest = (a, b) => (b.e.onTime - a.e.onTime) || (b.e.perHour - a.e.perHour);
+
+// Waarom kan deze opdracht (nog) niet? null = er is een vrije truck.
+function contractBlocker(c) {
+  const C = CARGO[c.cargo];
+  if (C.level > S.level) return { text: `Vanaf niveau ${C.level}` };
+  const owned = S.trucks.filter(t => fitsType(TRUCK_TYPES[t.type], c));
+  if (!owned.length) {
+    const types = Object.values(TRUCK_TYPES).filter(T => fitsType(T, c)).map(T => T.name.toLowerCase());
+    return { text: `Vereist een ${types.join(' of ')}`, shop: true };
+  }
+  if (!owned.some(t => t.state === 'idle')) return { text: 'Je geschikte trucks zijn onderweg' };
+  return null;
+}
+
+// ---------- doelbalk & tabs -------------------------------------------------
 function renderGoal() {
   const g = L.currentGoal();
   const box = $('#goal');
-  if (!g) { box.innerHTML = '<span>🏆 Alle doelen behaald — jij bent de echte Vrachtbaas!</span>'; return; }
+  if (!g) { box.innerHTML = '<span class="goal-flag" aria-hidden="true">🏆</span><div class="goal-text"><b>Alle doelen behaald</b><span class="sm">Jij bent de echte Vrachtbaas.</span></div>'; return; }
   let prog = '';
   if (g.progress) {
     const [cur, max] = g.progress(S);
-    prog = `<div class="bar"><i style="width:${clamp(cur / max * 100, 0, 100)}%"></i></div><span class="muted small">${Math.min(cur, max)}/${max}</span>`;
+    prog = `<span class="bar" role="progressbar" aria-label="Voortgang doel" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${Math.min(cur, max)}"><i style="width:${clamp(cur / max * 100, 0, 100)}%"></i></span><span class="sm muted num">${Math.min(cur, max)} van ${max}</span>`;
   }
-  box.innerHTML = `<div class="goal-text"><span class="muted small">🎯 Doel</span><b>${esc(g.text)}</b></div><div class="goal-side"><span class="reward">+${fmtMoney(g.reward)}</span>${prog}</div>`;
+  box.innerHTML = `<span class="goal-flag" aria-hidden="true">🎯</span><div class="goal-text"><span class="sm">Volgend doel</span><b>${esc(g.text)}</b></div><div class="goal-side"><span class="reward num">+${fmtMoney(g.reward)}</span>${prog}</div>`;
 }
 
 function renderTabs() {
   const idle = S.trucks.filter(t => t.state === 'idle').length;
-  const counts = { vracht: S.contracts.length, vloot: idle ? idle + ' vrij' : '' };
+  const counts = { vracht: S.contracts.length || '', vloot: idle || '' };
   document.querySelectorAll('#tabs button').forEach(b => {
-    b.classList.toggle('on', b.dataset.tab === activeTab);
+    const on = b.dataset.tab === ui.tab;
+    b.classList.toggle('on', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     const badge = b.querySelector('.badge');
-    if (badge) badge.textContent = counts[b.dataset.tab] || '';
+    if (badge) {
+      badge.textContent = counts[b.dataset.tab] || '';
+      badge.title = b.dataset.tab === 'vloot' ? 'Trucks die klaarstaan' : 'Opdrachten op de beurs';
+    }
   });
 }
+
+const focusKey = el => {
+  const d = el && el.dataset;
+  return d && d.action ? [d.action, d.id, d.key, d.tab, d.truck, d.contract, d.filter].join('|') : null;
+};
 
 function renderPanel() {
   renderGoal();
   renderTabs();
   const body = $('#tab-body');
+  const active = document.activeElement;
+  const key = body.contains(active) ? focusKey(active) : null;
   const scroll = body.scrollTop;
-  body.innerHTML = { vracht: viewContracts, vloot: viewFleet, netwerk: viewNetwork, upgrades: viewUpgrades, logboek: viewLog }[activeTab]();
+  body.innerHTML = { vracht: viewContracts, vloot: viewFleet, netwerk: viewNetwork, bedrijf: viewCompany, logboek: viewLog }[ui.tab]();
   body.scrollTop = scroll;
+
+  // focus terugzetten, anders verspringt het toetsenbord elke seconde
+  let target = ui.focusAfter ? $(ui.focusAfter, body) : null;
+  if (!target && key) target = [...body.querySelectorAll('[data-action]')].find(el => focusKey(el) === key);
+  if (target && (ui.focusAfter || key)) target.focus({ preventScroll: true });
+  ui.focusAfter = null;
+  ui.animate = false;
+  if (ui.scrollTo) {
+    const el = $(ui.scrollTo, body);
+    if (el) el.scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+    ui.scrollTo = null;
+  }
 }
 
-// ---------- tabbladen -------------------------------------------------------
-function bestFor(c) {
-  let best = null;
-  for (const t of S.trucks) {
-    if (t.state !== 'idle' || !L.canCarry(t, c)) continue;
-    const e = L.estimate(t, c);
-    const score = e.perHour + (e.onTime ? 1e6 : 0);
-    if (!best || score > best.score) best = { t, e, score };
+// ---------- tab: vracht -----------------------------------------------------
+function onboarding() {
+  return `<div class="notice"><div class="notice-body">
+    <h3>Welkom, nieuwe vrachtbaas</h3>
+    <p>Je erft een transportbedrijfje in Antwerpen: één bestelwagen en ${fmtMoney(START_MONEY)}. Zo begin je:</p>
+    <ol>
+      <li>Kies hieronder een opdracht en klik op <b>Plan rit</b>.</li>
+      <li>Kies de truck met de meeste winst. Lege kilometers kosten diesel en loon zonder iets op te brengen.</li>
+      <li>Lever op tijd, anders krijg je maar 60%. Na 9 uur rijden moet je chauffeur verplicht rusten.</li>
+    </ol>
+    ${button('Begrepen', { action: 'dismiss-intro' }, { cls: 'primary small' })}
+  </div></div>`;
+}
+
+function welcomeBack() {
+  const r = ui.banner;
+  const mins = Math.round(Math.min(r.away, MAX_OFFLINE_MS) / 60000);
+  const away = mins >= 60 ? `${Math.floor(mins / 60)}u${String(mins % 60).padStart(2, '0')}` : `${mins} min`;
+  return `<div class="notice success"><div class="notice-body">
+    <h3>Welkom terug</h3>
+    <p>Je was ${away} weg. Ondertussen: <b class="num">${r.money >= 0 ? '+' : ''}${fmtMoney(r.money)}</b> en ${r.deliveries} leveringen${r.levels ? `, en je steeg ${r.levels} niveau${r.levels > 1 ? 's' : ''}` : ''}.</p>
+    ${L.up('planner') ? '' : '<p class="sm muted">Met een Planningsafdeling blijven al je trucks rijden terwijl je weg bent.</p>'}
+  </div>${button('Sluiten', { action: 'dismiss-banner' }, { cls: 'quiet small' })}</div>`;
+}
+
+function contractOptions(c) {
+  const rows = S.trucks.filter(t => t.state === 'idle' && L.canCarry(t, c)).map(t => ({ t, e: L.estimate(t, c) })).sort(byBest);
+  let h = `<div class="options${ui.animate ? ' anim' : ''}"><div class="options-head"><h3>Kies een truck</h3>${button('Sluiten', { action: 'toggle-contract', id: c.id }, { cls: 'quiet small' })}</div>`;
+  if (!rows.length) return h + '<p class="sm muted">Geen geschikte truck meer vrij.</p></div>';
+  rows.forEach(({ t, e }, i) => {
+    h += `<div class="option${i === 0 ? ' best' : ''}" data-route="${c.from},${c.to}" data-via="${t.city}">
+      <div class="option-main">
+        <b>${t.plate}</b> ${i === 0 ? '<span class="pill blue">Beste keuze</span>' : ''}<br>
+        ${TRUCK_TYPES[t.type].name} in ${cityName(t.city)}<br>
+        <span class="muted">${e.empty ? `${fmtKm(e.empty)} leeg en ` : 'Staat al klaar, '}${fmtKm(e.loaded)} geladen, ${fmtDur(e.hours)}</span>
+      </div>
+      <div class="option-side">
+        <div class="option-profit"><span class="${e.profit < 0 ? 'warn' : ''}">${fmtMoney(e.profit)}</span><small>${e.onTime ? 'winst, op tijd' : 'winst, te laat'}</small></div>
+        ${button('Kies', { action: 'pick', truck: t.id, contract: c.id }, { cls: 'primary small', aria: `Kies ${t.plate} voor ${cityName(c.from)} naar ${cityName(c.to)}` })}
+      </div>
+    </div>`;
+  });
+  return h + '</div>';
+}
+
+function contractCard(c) {
+  const C = CARGO[c.cargo];
+  const left = c.deadline - S.time;
+  const blocker = contractBlocker(c);
+  const open = !blocker && isOpen('contract', c.id);
+  let side;
+  if (blocker) {
+    side = `<span class="reason">${esc(blocker.text)}</span>`
+      + (blocker.shop ? button('Naar de winkel', { action: 'goto-shop' }, { cls: 'quiet small' }) : '');
+  } else {
+    side = button('Plan rit', { action: 'toggle-contract', id: c.id }, { cls: 'secondary small', expanded: open, aria: `Plan rit ${cityName(c.from)} naar ${cityName(c.to)}` });
   }
-  return best;
+  return `<article class="card${open ? ' open' : ''}${C.level > S.level ? ' locked' : ''}" data-route="${c.from},${c.to}">
+    <div class="card-row">
+      <div class="tile-icon" aria-hidden="true">${C.icon}</div>
+      <div class="card-main">
+        <h3 class="card-title">${cityName(c.from)} <span aria-hidden="true">→</span><span class="visually-hidden">naar</span> <span class="to">${cityName(c.to)}</span></h3>
+        <p class="card-meta">${C.name}, ${fmtWeight(c.weight)}, ${fmtKm(c.km)}</p>
+        <div class="facts">
+          <span class="pill ${left < 6 ? 'warn' : ''}">Leveren binnen ${fmtDur(left)}</span>
+          <span class="muted">Vervalt over ${fmtDur(c.expires - S.time)}</span>
+        </div>
+      </div>
+      <div class="card-side"><span class="pay">${fmtMoney(L.payoutFor(c))}</span>${side}</div>
+    </div>
+    ${open ? contractOptions(c) : ''}
+  </article>`;
 }
 
 function viewContracts() {
-  const list = [...S.contracts].sort((a, b) => b.payout - a.payout);
-  let h = `<div class="tab-head"><h2>Vrachtbeurs</h2><span class="muted small">${list.length}/${L.boardMax()} opdrachten · aanbod uit ${L.networkCities().size} steden</span></div>`;
-  if (L.up('planner') && S.plannerOn) h += '<p class="hint">🧑‍💼 Je planner wijst vracht automatisch toe aan stilstaande trucks.</p>';
-  if (!list.length) return h + '<div class="empty">Even geen vracht. Er komt elk uur nieuw aanbod binnen…</div>';
-  for (const c of list) {
-    const C = CARGO[c.cargo];
-    const locked = C.level > S.level;
-    const left = c.deadline - S.time;
-    const best = locked ? null : bestFor(c);
-    const fits = T => T.cargo.includes(c.cargo) && T.capacity >= c.weight;
-    const owns = S.trucks.some(t => fits(TRUCK_TYPES[t.type]));
-    let action;
-    if (locked) action = `<span class="lock">🔒 Niveau ${C.level}</span>`;
-    else if (best) action = `<button class="btn primary" data-action="assign-contract" data-id="${c.id}">Toewijzen</button>`;
-    else if (!owns) action = `<span class="muted small">Vereist: ${esc(Object.values(TRUCK_TYPES).filter(fits).map(T => T.name).join(' of '))}</span>`;
-    else action = '<span class="muted small">Geen geschikte truck vrij</span>';
-    h += `<article class="card contract${locked ? ' locked' : ''}" data-route="${c.from},${c.to}">
-      <div class="c-icon">${C.icon}</div>
-      <div class="c-main">
-        <div class="c-title">${C.name} <span class="muted">· ${fmtWeight(c.weight)}</span></div>
-        <div class="c-route">${cityName(c.from)} <span class="arrow">→</span> ${cityName(c.to)} <span class="muted">· ${fmtKm(c.km)}</span></div>
-        <div class="c-meta"><span class="${left < 6 ? 'warn' : ''}">⏱ leveren binnen ${fmtDur(left)}</span> · <span>vervalt over ${fmtDur(c.expires - S.time)}</span></div>
-        ${best ? `<div class="c-est">Beste keuze: <b>${best.t.plate}</b> in ${cityName(best.t.city)} · winst ±${fmtMoney(best.e.profit)}${best.e.onTime ? '' : ' <span class="warn">⚠ te laat</span>'}</div>` : ''}
+  let h = '';
+  if (!S.introSeen) h += onboarding();
+  if (ui.banner) h += welcomeBack();
+  const all = [...S.contracts].sort((a, b) => b.payout - a.payout);
+  const fits = all.filter(c => CARGO[c.cargo].level <= S.level && S.trucks.some(t => fitsType(TRUCK_TYPES[t.type], c)));
+  const list = ui.filter === 'fits' ? fits : all;
+  const seg = (val, label) => `<button type="button" data-action="filter" data-filter="${val}" aria-pressed="${ui.filter === val}">${label}</button>`;
+  h += `<div class="section-head"><h2>Vrachtbeurs</h2><div class="segmented" role="group" aria-label="Filter">${seg('all', `Alles (${all.length})`)}${seg('fits', `Past in mijn vloot (${fits.length})`)}</div></div>`;
+  if (L.up('planner') && S.plannerOn) h += '<p class="sm muted" style="margin:-8px 0 16px">Je planner wijst vracht automatisch toe aan trucks die klaarstaan.</p>';
+  if (!all.length) return h + '<div class="empty"><b>Even geen vracht</b>Er komt elk speluur nieuw aanbod binnen. Meer depots betekent meer aanbod.</div>';
+  if (!list.length) return h + `<div class="empty"><b>Niets dat je vloot nu kan rijden</b>Bekijk alle opdrachten om te zien welke truck je nodig hebt.<div class="actions" style="justify-content:center">${button('Toon alles', { action: 'filter', filter: 'all' }, { cls: 'secondary small' })}</div></div>`;
+  return h + `<div class="list">${list.map(contractCard).join('')}</div>`;
+}
+
+// ---------- tab: vloot ------------------------------------------------------
+function truckOptions(t) {
+  const rows = S.contracts.filter(c => L.canCarry(t, c)).map(c => ({ c, e: L.estimate(t, c) })).sort(byBest);
+  let h = `<div class="options${ui.animate ? ' anim' : ''}"><div class="options-head"><h3>Beste ritten vanaf ${cityName(t.city)}</h3>${button('Sluiten', { action: 'toggle-truck', id: t.id }, { cls: 'quiet small' })}</div>`;
+  if (!rows.length) return h + '<p class="sm muted">Geen passende vracht op de beurs. Wacht op nieuw aanbod of open een depot voor meer vracht.</p></div>';
+  rows.slice(0, 6).forEach(({ c, e }, i) => {
+    h += `<div class="option${i === 0 ? ' best' : ''}" data-route="${c.from},${c.to}" data-via="${t.city}">
+      <div class="option-main">
+        <b>${cityName(c.from)} → ${cityName(c.to)}</b> ${i === 0 ? '<span class="pill blue">Beste keuze</span>' : ''}<br>
+        ${CARGO[c.cargo].icon} ${CARGO[c.cargo].name}, ${fmtWeight(c.weight)}, vergoeding ${fmtMoney(L.payoutFor(c))}<br>
+        <span class="muted">${e.empty ? `${fmtKm(e.empty)} leeg en ` : ''}${fmtKm(e.loaded)} geladen, ${fmtDur(e.hours)}</span>
       </div>
-      <div class="c-side"><div class="c-pay">${fmtMoney(L.payoutFor(c))}</div>${action}</div>
-    </article>`;
+      <div class="option-side">
+        <div class="option-profit"><span class="${e.profit < 0 ? 'warn' : ''}">${fmtMoney(e.profit)}</span><small>${e.onTime ? 'winst, op tijd' : 'winst, te laat'}</small></div>
+        ${button('Kies', { action: 'pick', truck: t.id, contract: c.id }, { cls: 'primary small', aria: `Kies rit ${cityName(c.from)} naar ${cityName(c.to)}` })}
+      </div>
+    </div>`;
+  });
+  return h + '</div>';
+}
+
+function truckCard(t) {
+  const T = TRUCK_TYPES[t.type];
+  const open = t.state === 'idle' && isOpen('truck', t.id);
+  const condColor = t.cond < 40 ? 'var(--danger)' : t.cond < 70 ? 'var(--signal-dark)' : 'var(--success)';
+  let actions = '';
+  if (t.state === 'idle') {
+    actions += button(open ? 'Verberg ritten' : 'Zoek vracht', { action: 'toggle-truck', id: t.id }, { cls: 'secondary small', expanded: open });
+    if (t.cond < 95) {
+      const cost = L.repairCost(t);
+      actions += button(`Onderhoud ${fmtMoney(cost)}`, { action: 'repair', id: t.id }, { cls: 'secondary small', disabled: S.money < cost });
+      if (S.money < cost) actions += `<span class="reason">${shortBy(cost)}</span>`;
+    }
+    if (S.trucks.length > 1) actions += confirmButton(`sell-${t.id}`, 'Verkopen', `Ja, verkopen voor ${fmtMoney(L.sellValue(t))}`, { action: 'sell', id: t.id });
+  } else if (t.state === 'toPickup') {
+    actions += button('Rit annuleren', { action: 'cancel', id: t.id }, { cls: 'quiet small' });
   }
-  return h;
+  const routeAttr = t.job
+    ? ` data-route="${t.job.from},${t.job.to}" data-via="${t.state === 'toPickup' && t.route ? t.route.path[0] : ''}"`
+    : t.route ? ` data-route="${t.route.path[0]},${t.route.path[0]}" data-via=""` : '';
+  return `<article class="card state-${t.state}${open ? ' open' : ''}" id="truck-${t.id}"${routeAttr}>
+    <div class="card-row">
+      <div class="tile-icon truck-icon" style="--c:${T.color}">${TRUCK_SVG}</div>
+      <div class="card-main">
+        <h3 class="card-title">${t.plate}</h3>
+        <p class="card-meta">${T.name}, chauffeur ${esc(t.driver)}</p>
+        <p class="status"><span class="status-dot" aria-hidden="true"></span>${statusText(t)}</p>
+        ${t.state === 'idle' ? '' : `<span class="bar" role="progressbar" aria-label="Voortgang" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(truckProgress(t) * 100)}"><i style="width:${(truckProgress(t) * 100).toFixed(1)}%"></i></span>`}
+        <div class="facts">
+          <span>Conditie ${Math.round(t.cond)}%<span class="cond-bar" aria-hidden="true"><i style="width:${t.cond}%;background:${condColor}"></i></span></span>
+          ${t.cond < 40 ? '<span class="pill bad">Onderhoud nodig</span>' : ''}
+          <span class="num">${fmtKm(t.km)}</span><span>${t.trips} ritten</span><span class="num">winst ${fmtMoney(t.earned)}</span>
+        </div>
+      </div>
+    </div>
+    ${actions ? `<div class="actions">${actions}</div>` : ''}
+    ${open ? truckOptions(t) : ''}
+  </article>`;
+}
+
+function shopCard(id, T) {
+  let side;
+  if (S.level < T.level) side = `<span class="reason">Vanaf niveau ${T.level}</span>`;
+  else if (S.money < T.price) side = button('Kopen', { action: 'buy-truck', id }, { cls: 'secondary small', disabled: true }) + `<span class="reason">${shortBy(T.price)}</span>`;
+  else side = button('Kopen', { action: 'buy-truck', id }, { cls: 'secondary small', aria: `${T.name} kopen voor ${fmtMoney(T.price)}` });
+  return `<article class="card${S.level < T.level ? ' locked' : ''}">
+    <div class="card-row">
+      <div class="tile-icon truck-icon" style="--c:${T.color}">${TRUCK_SVG}</div>
+      <div class="card-main">
+        <h3 class="card-title">${T.name}</h3>
+        <p class="card-meta">Rijdt ${T.cargo.map(k => CARGO[k].name.toLowerCase()).join(' en ')}</p>
+        <div class="facts"><span>Tot ${T.capacity} t</span><span>${T.speed} km/u</span><span>${T.fuel} L per 100 km</span><span>Loon € ${T.wage}/u</span></div>
+      </div>
+      <div class="card-side"><span class="pay">${fmtMoney(T.price)}</span>${side}</div>
+    </div>
+  </article>`;
 }
 
 function viewFleet() {
-  let h = `<div class="tab-head"><h2>Vloot</h2><span class="muted small">${S.trucks.length} voertuigen</span></div>`;
-  for (const t of S.trucks) {
-    const T = TRUCK_TYPES[t.type];
-    const condCls = t.cond < 40 ? 'bad' : t.cond < 70 ? 'mid' : 'ok';
-    let btns = '';
-    if (t.state === 'idle') {
-      btns += `<button class="btn primary" data-action="find-load" data-id="${t.id}">Zoek vracht</button>`;
-      if (t.cond < 95) btns += `<button class="btn" data-action="repair" data-id="${t.id}" ${S.money < L.repairCost(t) ? 'disabled' : ''}>🔧 ${fmtMoney(L.repairCost(t))}</button>`;
-      if (S.trucks.length > 1) btns += `<button class="btn ghost" data-action="sell" data-id="${t.id}" title="Verkopen voor ${fmtMoney(L.sellValue(t))}">💸</button>`;
-    }
-    const routeAttr = t.job
-      ? ` data-route="${t.job.from},${t.job.to}" data-via="${t.state === 'toPickup' && t.route ? t.route.path[0] : ''}"`
-      : ` data-route="${t.city},${t.city}"`;
-    h += `<article class="card truck-card state-${t.state}"${routeAttr}>
-      <div class="t-icon" style="--c:${T.color}">${T.icon}</div>
-      <div class="t-main">
-        <div class="t-title"><b>${t.plate}</b> <span class="muted">· ${T.name} · ${esc(t.driver)}</span></div>
-        <div class="t-status">${statusText(t)}</div>
-        <div class="bar ${t.state === 'idle' ? 'dim' : ''}"><i style="width:${(truckProgress(t) * 100).toFixed(1)}%"></i></div>
-        <div class="t-meta"><span class="cond ${condCls}">Conditie ${Math.round(t.cond)}%</span> · ${fmtKm(t.km)} · ${t.trips} ritten · winst ${fmtMoney(t.earned)}</div>
-      </div>
-      <div class="t-actions">${btns}</div>
-    </article>`;
-  }
+  const moving = S.trucks.filter(t => t.state !== 'idle').length;
+  const ready = S.trucks.length - moving;
+  const service = S.trucks.filter(t => t.cond < 40).length;
+  let h = `<div class="section-head"><h2>Vloot</h2><span class="sm muted">${S.trucks.length} voertuig${S.trucks.length === 1 ? '' : 'en'}</span></div>
+    <div class="summary">
+      <div class="tile"><span>Onderweg</span><b>${moving}</b></div>
+      <div class="tile"><span>Klaar</span><b>${ready}</b></div>
+      <div class="tile"><span>Onderhoud nodig</span><b class="${service ? 'warn' : ''}">${service}</b></div>
+    </div>
+    <div class="list">${S.trucks.map(truckCard).join('')}</div>`;
 
-  if (!S.depots.includes(buyCity)) buyCity = S.depots[0];
-  h += `<div class="tab-head sub"><h3>Voertuig kopen</h3>
-    <label class="small muted">Leveren in <select data-role="buy-city">${S.depots.map(d => `<option value="${d}" ${d === buyCity ? 'selected' : ''}>${cityName(d)}</option>`).join('')}</select></label></div>`;
-  h += '<div class="shop">';
-  for (const [id, T] of Object.entries(TRUCK_TYPES)) {
-    const locked = S.level < T.level;
-    h += `<article class="card shop-item${locked ? ' locked' : ''}">
-      <div class="t-icon" style="--c:${T.color}">${T.icon}</div>
-      <div class="s-main">
-        <b>${T.name}</b>
-        <div class="specs"><span>🏋️ ${T.capacity} t</span><span>💨 ${T.speed} km/u</span><span>⛽ ${T.fuel} L/100</span><span>👷 € ${T.wage}/u</span></div>
-        <div class="small muted">Vracht: ${T.cargo.map(k => CARGO[k].icon + ' ' + CARGO[k].name).join(', ')}</div>
+  if (!S.depots.includes(ui.buyCity)) ui.buyCity = S.depots[0];
+  h += `<div class="section-head sub" id="shop"><h2>Voertuig kopen</h2>
+    <label class="select-label">Leveren in <select data-role="buy-city">${S.depots.map(d => `<option value="${d}" ${d === ui.buyCity ? 'selected' : ''}>${cityName(d)}</option>`).join('')}</select></label></div>`;
+  return h + `<div class="list">${Object.entries(TRUCK_TYPES).map(([id, T]) => shopCard(id, T)).join('')}</div>`;
+}
+
+// ---------- tab: netwerk ----------------------------------------------------
+function viewNetwork() {
+  const net = L.networkCities();
+  const price = L.depotPrice();
+  let h = `<div class="section-head"><h2>Netwerk</h2><span class="sm muted">${S.depots.length} depot${S.depots.length === 1 ? '' : 's'}</span></div>
+    <p class="muted" style="margin-bottom:16px;max-width:60ch">Vracht vertrekt uit je depotsteden en hun buursteden. Een nieuw depot brengt meer aanbod op de vrachtbeurs, en je kunt er trucks laten leveren. Elk volgend depot kost het dubbele.</p>
+    <div class="list">`;
+  const rank = id => (S.depots.includes(id) ? 2 : net.has(id) ? 1 : 0);
+  const ids = Object.keys(CITIES).sort((a, b) => rank(b) - rank(a) || cityName(a).localeCompare(cityName(b)));
+  for (const id of ids) {
+    const c = CITIES[id];
+    const depot = S.depots.includes(id);
+    const open = ui.city === id;
+    const pill = depot ? '<span class="pill blue">Depot</span>' : net.has(id) ? '<span class="pill ok">In je netwerk</span>' : '<span class="pill">Buiten je netwerk</span>';
+    let side = '';
+    if (!depot) side = S.money >= price
+      ? button(`Depot ${fmtMoney(price)}`, { action: 'build-depot', id }, { cls: 'secondary small', aria: `Depot openen in ${c.name} voor ${fmtMoney(price)}` })
+      : button(`Depot ${fmtMoney(price)}`, { action: 'build-depot', id }, { cls: 'secondary small', disabled: true }) + `<span class="reason">${shortBy(price)}</span>`;
+    let details = '';
+    if (open) {
+      const here = S.trucks.filter(t => !t.route && t.city === id).length;
+      const out = S.contracts.filter(x => x.from === id).length;
+      details = `<div class="options${ui.animate ? ' anim' : ''}">
+        <p class="sm"><b>Wegen:</b> ${ADJ[id].map(e => `${e.road} naar ${cityName(e.to)}`).join(', ')}</p>
+        <p class="sm"><b>Nu:</b> ${here} truck${here === 1 ? '' : 's'} ter plaatse, ${out} opdracht${out === 1 ? '' : 'en'} vanuit ${c.name}</p>
+      </div>`;
+    }
+    h += `<article class="card${open ? ' open' : ''}" id="city-${id}" data-route="${id},${id}">
+      <div class="card-row">
+        <div class="card-main">
+          <h3 class="card-title">${c.port ? '<span aria-hidden="true">⚓</span> ' : ''}${c.name} <span class="sm muted">${c.country}</span></h3>
+          <div class="facts">${pill}<span>${Object.keys(c.cargo).map(k => `<span title="${CARGO[k].name}" aria-label="${CARGO[k].name}">${CARGO[k].icon}</span>`).join(' ')}</span></div>
+        </div>
+        <div class="card-side">${side}${button(open ? 'Minder' : 'Details', { action: 'city', id }, { cls: 'quiet small', expanded: open, aria: `Details ${c.name}` })}</div>
       </div>
-      <div>${locked ? `<span class="lock">🔒 Niveau ${T.level}</span>` : `<button class="btn primary" data-action="buy-truck" data-id="${id}" ${S.money < T.price ? 'disabled' : ''}>${fmtMoney(T.price)}</button>`}</div>
+      ${details}
     </article>`;
   }
   return h + '</div>';
 }
 
-function viewNetwork() {
-  const net = L.networkCities();
-  const price = L.depotPrice();
-  let h = `<div class="tab-head"><h2>Netwerk</h2><span class="muted small">${S.depots.length} depots</span></div>
-    <p class="hint">Vracht vertrekt uit je depotsteden en hun buursteden. Elk depot zorgt voor meer aanbod op de vrachtbeurs en je kunt er nieuwe trucks laten leveren.</p>`;
-  const ids = Object.keys(CITIES).sort((a, b) => (S.depots.includes(b) - S.depots.includes(a)) || (net.has(b) - net.has(a)) || cityName(a).localeCompare(cityName(b)));
-  for (const id of ids) {
-    const c = CITIES[id];
-    const depot = S.depots.includes(id);
-    const status = depot ? '<span class="tag depot">🏭 Depot</span>' : net.has(id) ? '<span class="tag net">In netwerk</span>' : '<span class="tag off">Buiten netwerk</span>';
-    const specs = Object.keys(c.cargo).map(k => `<span title="${CARGO[k].name}">${CARGO[k].icon}</span>`).join('');
-    h += `<article class="card city-card" data-route="${id},${id}">
-      <div class="c-main"><div class="c-title">${c.port ? '⚓ ' : ''}${c.name} <span class="muted small">${c.country}</span> ${status}</div>
-      <div class="small muted">Specialiteit: ${specs}</div></div>
-      <div>${depot ? '' : `<button class="btn" data-action="build-depot" data-id="${id}" ${S.money < price ? 'disabled' : ''}>Depot ${fmtMoney(price)}</button>`}</div>
-    </article>`;
-  }
-  return h;
-}
-
-function viewUpgrades() {
-  let h = '<div class="tab-head"><h2>Bedrijf</h2></div>';
+// ---------- tab: bedrijf ----------------------------------------------------
+function viewCompany() {
+  let h = '<div class="section-head"><h2>Bedrijf</h2></div><div class="list">';
   for (const u of UPGRADES) {
     const owned = L.up(u.id);
-    const locked = S.level < u.level;
     let side;
-    if (owned && u.id === 'planner') side = `<button class="btn ${S.plannerOn ? 'primary' : ''}" data-action="toggle-planner">${S.plannerOn ? 'Actief' : 'Gepauzeerd'}</button>`;
-    else if (owned) side = '<span class="tag depot">✔ In bezit</span>';
-    else if (locked) side = `<span class="lock">🔒 Niveau ${u.level}</span>`;
-    else side = `<button class="btn primary" data-action="buy-upgrade" data-id="${u.id}" ${S.money < u.price ? 'disabled' : ''}>${fmtMoney(u.price)}</button>`;
-    h += `<article class="card upgrade${owned ? ' owned' : ''}${locked ? ' locked' : ''}">
-      <div class="c-icon">${u.icon}</div>
-      <div class="c-main"><div class="c-title">${u.name}</div><div class="small muted">${u.desc}</div></div>
-      <div>${side}</div>
+    if (owned && u.id === 'planner') side = `<button type="button" class="switch" data-action="toggle-planner" aria-pressed="${S.plannerOn}"><span class="track" aria-hidden="true"></span>${S.plannerOn ? 'Aan' : 'Uit'}</button>`;
+    else if (owned) side = '<span class="pill ok">In bezit</span>';
+    else if (S.level < u.level) side = `<span class="reason">Vanaf niveau ${u.level}</span>`;
+    else if (S.money < u.price) side = button('Kopen', { action: 'buy-upgrade', id: u.id }, { cls: 'secondary small', disabled: true }) + `<span class="reason">${shortBy(u.price)}</span>`;
+    else side = button('Kopen', { action: 'buy-upgrade', id: u.id }, { cls: 'secondary small', aria: `${u.name} kopen` });
+    h += `<article class="card${!owned && S.level < u.level ? ' locked' : ''}">
+      <div class="card-row">
+        <div class="tile-icon" aria-hidden="true">${u.icon}</div>
+        <div class="card-main"><h3 class="card-title">${u.name}</h3><p class="card-meta" style="max-width:48ch">${u.desc}</p></div>
+        <div class="card-side">${owned ? '' : `<span class="pay">${fmtMoney(u.price)}</span>`}${side}</div>
+      </div>
     </article>`;
   }
-  return h;
+  return h + '</div>';
 }
 
+// ---------- tab: logboek ----------------------------------------------------
 function viewLog() {
   const st = S.stats;
-  const tile = (label, value) => `<div class="tile"><span class="muted small">${label}</span><b>${value}</b></div>`;
-  let h = '<div class="tab-head"><h2>Logboek</h2></div><div class="tiles">';
+  const tile = (label, value) => `<div class="tile"><span>${label}</span><b>${value}</b></div>`;
+  let h = '<div class="section-head"><h2>Logboek</h2></div><div class="tiles">';
   h += tile('Bedrijfswaarde', fmtMoney(L.companyValue()));
   h += tile('Leveringen', st.deliveries.toLocaleString('nl-BE'));
   h += tile('Op tijd', st.deliveries ? Math.round((1 - st.late / st.deliveries) * 100) + '%' : '—');
@@ -347,97 +565,9 @@ function viewLog() {
   h += tile('Omzet', fmtMoney(st.income));
   h += tile('Kosten', fmtMoney(st.costs));
   h += '</div><ul class="log">';
-  for (const e of S.log) h += `<li><span class="muted small">${fmtClock(e.t)}</span> ${esc(e.text)}</li>`;
-  h += '</ul><div class="danger-zone"><button class="btn ghost" data-action="help">❓ Uitleg</button><button class="btn ghost" data-action="reset">↺ Opnieuw beginnen</button></div>';
+  for (const e of S.log) h += `<li><time>${fmtClock(e.t)}</time><span>${esc(e.text)}</span></li>`;
+  h += `</ul><div class="footer-actions">${button('Uitleg opnieuw tonen', { action: 'help' }, { cls: 'quiet small' })}${confirmButton('reset', 'Opnieuw beginnen', 'Ja, alles wissen', { action: 'reset' })}</div>`;
   return h;
-}
-
-// ---------- modals ----------------------------------------------------------
-function openModal(html) {
-  $('#modal-content').innerHTML = html;
-  $('#modal').hidden = false;
-}
-function closeModal() {
-  $('#modal').hidden = true;
-  clearRoute();
-}
-
-function estRow(t, c, e) {
-  const C = CARGO[c.cargo];
-  return `<div class="pick-row" data-route="${c.from},${c.to}" data-via="${t.city}">
-    <div class="pick-main">
-      <b>${TRUCK_TYPES[t.type].icon} ${t.plate}</b> <span class="muted small">in ${cityName(t.city)}</span><br>
-      <span class="small">${C.icon} ${cityName(c.from)} → ${cityName(c.to)} · ${fmtWeight(c.weight)} · ${fmtMoney(L.payoutFor(c))}</span><br>
-      <span class="small muted">${e.empty ? `${fmtKm(e.empty)} leeg + ` : ''}${fmtKm(e.loaded)} geladen · ${fmtDur(e.hours)}</span>
-      ${e.onTime ? '<span class="small ok"> · op tijd</span>' : '<span class="small warn"> · ⚠ te laat (−40%)</span>'}
-    </div>
-    <div class="pick-side"><span class="${e.profit >= 0 ? 'ok' : 'warn'}">${fmtMoney(e.profit)}</span><span class="muted small">winst</span>
-      <button class="btn primary" data-action="pick" data-truck="${t.id}" data-contract="${c.id}">Kies</button></div>
-  </div>`;
-}
-
-const byBest = (a, b) => (b.e.onTime - a.e.onTime) || (b.e.perHour - a.e.perHour);
-
-function openAssignForContract(c) {
-  const rows = S.trucks.filter(t => t.state === 'idle' && L.canCarry(t, c)).map(t => ({ t, e: L.estimate(t, c) })).sort(byBest);
-  openModal(`<h2>${CARGO[c.cargo].icon} ${cityName(c.from)} → ${cityName(c.to)}</h2>
-    <p class="muted small">${CARGO[c.cargo].name} · ${fmtWeight(c.weight)} · vergoeding ${fmtMoney(L.payoutFor(c))} · kies een truck</p>
-    <div class="pick-list">${rows.map(r => estRow(r.t, c, r.e)).join('') || '<div class="empty">Geen geschikte truck vrij.</div>'}</div>
-    <div class="modal-foot"><button class="btn ghost" data-action="close-modal">Annuleren</button></div>`);
-  if (rows[0]) highlightRoute(c.from, c.to, rows[0].t.city);
-}
-
-function openAssignForTruck(t) {
-  const rows = S.contracts.filter(c => L.canCarry(t, c)).map(c => ({ c, e: L.estimate(t, c) })).sort(byBest);
-  openModal(`<h2>${TRUCK_TYPES[t.type].icon} Vracht voor ${t.plate}</h2>
-    <p class="muted small">${TRUCK_TYPES[t.type].name} · staat in ${cityName(t.city)} · beste winst per uur bovenaan</p>
-    <div class="pick-list">${rows.map(r => estRow(t, r.c, r.e)).join('') || '<div class="empty">Geen passende vracht op de beurs. Wacht op nieuw aanbod of breid je netwerk uit.</div>'}</div>
-    <div class="modal-foot"><button class="btn ghost" data-action="close-modal">Sluiten</button></div>`);
-  if (rows[0]) highlightRoute(rows[0].c.from, rows[0].c.to, t.city);
-}
-
-function openCity(id) {
-  const c = CITIES[id];
-  const depot = S.depots.includes(id);
-  const net = L.networkCities().has(id);
-  const here = S.trucks.filter(t => !t.route && t.city === id);
-  const out = S.contracts.filter(x => x.from === id);
-  const price = L.depotPrice();
-  openModal(`<h2>${c.port ? '⚓ ' : ''}${c.name} <span class="muted small">${c.country}</span></h2>
-    <p class="small">${depot ? '🏭 Je hebt hier een depot.' : net ? 'Deze stad ligt in je netwerk: er vertrekt vracht vanuit hier.' : 'Deze stad ligt buiten je netwerk. Open hier of in een buurstad een depot.'}</p>
-    <p class="small muted">Specialiteit: ${Object.keys(c.cargo).map(k => CARGO[k].icon + ' ' + CARGO[k].name).join(', ')}</p>
-    <p class="small muted">Wegen: ${ADJ[id].map(e => `${e.road} → ${cityName(e.to)}`).join(' · ')}</p>
-    <p class="small">${here.length} voertuig(en) hier · ${out.length} opdracht(en) vanuit deze stad</p>
-    <div class="modal-foot">
-      ${depot ? '' : `<button class="btn primary" data-action="build-depot" data-id="${id}" ${S.money < price ? 'disabled' : ''}>Depot openen · ${fmtMoney(price)}</button>`}
-      <button class="btn ghost" data-action="close-modal">Sluiten</button></div>`);
-  highlightRoute(id, id);
-}
-
-function showIntro() {
-  openModal(`<h2>🚛 Welkom bij Vrachtbaas</h2>
-    <p>Je erft een klein transportbedrijfje in Antwerpen: één bestelwagen, € ${START_MONEY.toLocaleString('nl-BE')} en een droom. Bouw het uit tot dé logistieke speler van de Benelux.</p>
-    <ol class="intro">
-      <li><b>Vrachtbeurs</b>: kies een opdracht en wijs ze toe aan een vrije truck.</li>
-      <li><b>Lege kilometers</b> kosten diesel en loon. Plan slim zodat je trucks eindigen waar de volgende vracht klaarstaat.</li>
-      <li><b>Deadlines</b>: te laat = maar 60% van de vergoeding. Chauffeurs moeten na 9 uur rijden verplicht rusten.</li>
-      <li><b>Groei</b>: stijg in niveau, koop zwaardere trucks, open depots in nieuwe steden en neem een planner aan die alles automatisch regelt.</li>
-    </ol>
-    <p class="small muted">Tip: beweeg over een opdracht om de route op de kaart te zien. Het spel bewaart automatisch.</p>
-    <div class="modal-foot"><button class="btn primary" data-action="close-modal">Start de motor!</button></div>`);
-}
-
-function showWelcomeBack(r, away) {
-  const mins = Math.round(Math.min(away, MAX_OFFLINE_MS) / 60000);
-  openModal(`<h2>👋 Welkom terug!</h2>
-    <p>Je was ${mins >= 60 ? Math.floor(mins / 60) + 'u' + String(mins % 60).padStart(2, '0') : mins + ' min'} weg (${Math.round(r.hours / 24)} speldagen).</p>
-    <div class="tiles">
-      <div class="tile"><span class="muted small">Resultaat</span><b class="${r.money >= 0 ? 'ok' : 'warn'}">${r.money >= 0 ? '+' : ''}${fmtMoney(r.money)}</b></div>
-      <div class="tile"><span class="muted small">Leveringen</span><b>${r.deliveries}</b></div>
-      ${r.levels ? `<div class="tile"><span class="muted small">Niveaus</span><b>+${r.levels}</b></div>` : ''}
-    </div>
-    ${L.up('planner') ? '' : '<p class="small muted">Tip: met een Planningsafdeling blijven je trucks ook rijden als je weg bent.</p>'}
-    <div class="modal-foot"><button class="btn primary" data-action="close-modal">Verder spelen</button></div>`);
 }
 
 // ---------- invoer ----------------------------------------------------------
@@ -445,80 +575,104 @@ const findTruck = id => S.trucks.find(t => t.id === Number(id));
 const findContract = id => S.contracts.find(c => c.id === Number(id));
 
 function resetGame() {
-  if (!confirm('Weet je zeker dat je opnieuw wilt beginnen? Je voortgang gaat verloren.')) return;
   L.wipeSave();
   L.newGame();
-  S.introSeen = true;
   truckEls.forEach(el => el.remove());
   truckEls.clear();
+  Object.assign(ui, { tab: 'vracht', open: null, city: null, banner: null, confirm: null });
   renderCities();
   renderEvents();
-  closeModal();
+  clearRoute();
 }
 
-function onAction(btn) {
-  const { action, id } = btn.dataset;
+function switchTab(tab) {
+  if (ui.tab !== tab) { ui.tab = tab; $('#tab-body').scrollTop = 0; }
+  clearRoute();
+  renderCities();
+}
+
+function onAction(el) {
+  const { action, id } = el.dataset;
   switch (action) {
-    case 'tab': activeTab = btn.dataset.tab; clearRoute(); $('#tab-body').scrollTop = 0; break;
-    case 'speed': S.speed = Number(btn.dataset.speed); break;
-    case 'assign-contract': { const c = findContract(id); if (c) openAssignForContract(c); break; }
-    case 'find-load': { const t = findTruck(id); if (t) openAssignForTruck(t); break; }
+    case 'tab': switchTab(el.dataset.tab); break;
+    case 'speed': S.speed = Number(el.dataset.speed); break;
+    case 'filter': ui.filter = el.dataset.filter; ui.open = null; break;
+    case 'toggle-contract': ui.open = isOpen('contract', Number(id)) ? null : { kind: 'contract', id: Number(id) }; ui.animate = !!ui.open; break;
+    case 'toggle-truck': ui.open = isOpen('truck', Number(id)) ? null : { kind: 'truck', id: Number(id) }; ui.animate = !!ui.open; break;
     case 'pick': {
-      const t = findTruck(btn.dataset.truck), c = findContract(btn.dataset.contract);
-      if (t && c && L.assign(t, c)) toast(`${TRUCK_TYPES[t.type].icon} ${t.plate} vertrekt naar ${cityName(c.from)}`, 'good');
-      else toast('Deze combinatie is niet meer beschikbaar.', 'bad');
-      closeModal();
+      const t = findTruck(el.dataset.truck), c = findContract(el.dataset.contract);
+      if (t && c && L.assign(t, c)) toast(`${t.plate} vertrekt naar ${cityName(c.from)}`, 'good');
+      else toast('Deze rit is niet meer beschikbaar.', 'bad');
+      ui.open = null;
+      clearRoute();
       break;
     }
-    case 'repair': { const t = findTruck(id); if (t) L.repairTruck(t); break; }
-    case 'sell': {
-      const t = findTruck(id);
-      if (t && confirm(`${t.plate} verkopen voor ${fmtMoney(L.sellValue(t))}?`)) L.sellTruck(t);
-      break;
-    }
-    case 'buy-truck': L.buyTruck(id, S.depots.includes(buyCity) ? buyCity : S.depots[0]); break;
-    case 'build-depot': L.buildDepot(id); closeModal(); break;
+    case 'cancel': { const t = findTruck(id); if (t && L.cancelJob(t)) toast(`Rit van ${t.plate} geannuleerd, de opdracht staat terug op de beurs`); break; }
+    case 'repair': { const t = findTruck(id); if (t && L.repairTruck(t)) toast(`${t.plate} is weer als nieuw`, 'good'); break; }
+    case 'arm': ui.confirm = { key: el.dataset.key, until: performance.now() + 5000 }; ui.focusAfter = `[data-confirm-of="${el.dataset.key}"]`; break;
+    case 'disarm': ui.confirm = null; break;
+    case 'sell': { const t = findTruck(id); ui.confirm = null; if (t) L.sellTruck(t); break; }
+    case 'reset': ui.confirm = null; resetGame(); break;
+    case 'buy-truck': L.buyTruck(id, S.depots.includes(ui.buyCity) ? ui.buyCity : S.depots[0]); break;
+    case 'build-depot': L.buildDepot(id); break;
     case 'buy-upgrade': L.buyUpgrade(id); break;
     case 'toggle-planner': S.plannerOn = !S.plannerOn; break;
-    case 'city': openCity(id); break;
-    case 'close-modal': closeModal(); break;
-    case 'help': showIntro(); break;
-    case 'reset': resetGame(); break;
+    case 'goto-shop': switchTab('vloot'); ui.scrollTo = '#shop'; break;
+    case 'city': {
+      const fromMap = !!el.closest('#map');
+      ui.city = fromMap || ui.city !== id ? id : null;
+      ui.animate = !!ui.city;
+      if (fromMap) { switchTab('netwerk'); ui.scrollTo = `#city-${id}`; highlightRoute(id, id); }
+      renderCities();
+      break;
+    }
+    case 'truck': switchTab('vloot'); ui.scrollTo = `#truck-${id}`; break;
+    case 'dismiss-intro': S.introSeen = true; break;
+    case 'dismiss-banner': ui.banner = null; break;
+    case 'help': S.introSeen = false; switchTab('vracht'); break;
   }
-  dirty = true;
+  ui.dirty = true;
   L.save();
 }
 
 function bindInput() {
   document.addEventListener('click', e => {
-    const btn = e.target.closest('[data-action]');
-    if (btn && !btn.disabled) onAction(btn);
-    else if (e.target.id === 'modal') closeModal();
+    const el = e.target.closest('[data-action]');
+    if (el && !el.disabled) onAction(el);
   });
-  document.addEventListener('change', e => {
-    if (e.target.dataset.role === 'buy-city') buyCity = e.target.value;
-  });
-  // Niet hertekenen terwijl je klikt, anders verdwijnt de knop onder je muis.
-  document.addEventListener('pointerdown', () => { pointerDown = true; });
-  document.addEventListener('pointerup', () => setTimeout(() => { pointerDown = false; }, 80));
-  document.addEventListener('pointercancel', () => { pointerDown = false; });
+  // steden op de kaart zijn SVG-elementen: Enter/spatie laten werken zoals bij een knop
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeModal();
-    if (e.target.tagName === 'SELECT') return;
+    const el = e.target;
+    if ((e.key === 'Enter' || e.key === ' ') && el.getAttribute && el.getAttribute('role') === 'button' && el.dataset.action) {
+      e.preventDefault();
+      onAction(el);
+      return;
+    }
+    if (e.key === 'Escape') { ui.open = null; ui.confirm = null; ui.dirty = true; return; }
+    if (['SELECT', 'INPUT', 'TEXTAREA'].includes(el.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
     const speeds = { p: 0, 1: 1, 2: 2, 3: 4 };
     const k = e.key.toLowerCase();
     if (k in speeds) S.speed = speeds[k];
   });
+  document.addEventListener('change', e => {
+    if (e.target.dataset.role === 'buy-city') ui.buyCity = e.target.value;
+  });
+  // niet hertekenen terwijl je klikt, anders verdwijnt de knop onder je vinger
+  document.addEventListener('pointerdown', () => { ui.pointerDown = true; });
+  document.addEventListener('pointerup', () => setTimeout(() => { ui.pointerDown = false; }, 80));
+  document.addEventListener('pointercancel', () => { ui.pointerDown = false; });
 
-  const hover = e => {
-    const card = e.target.closest('[data-route]');
+  // route tonen bij aanwijzen of toetsenbordfocus op een kaart
+  const preview = e => {
+    const card = e.target.closest && e.target.closest('[data-route]');
     if (!card) return;
     const [from, to] = card.dataset.route.split(',');
     highlightRoute(from, to, card.dataset.via);
   };
-  $('#tab-body').addEventListener('mouseover', hover);
-  $('#tab-body').addEventListener('mouseleave', () => { if ($('#modal').hidden) clearRoute(); });
-  $('#modal-content').addEventListener('mouseover', hover);
+  const body = $('#tab-body');
+  body.addEventListener('mouseover', preview);
+  body.addEventListener('focusin', preview);
+  body.addEventListener('mouseleave', () => { if (!ui.open) clearRoute(); });
 
   document.addEventListener('visibilitychange', () => { if (document.hidden) L.save(); });
   window.addEventListener('beforeunload', L.save);
@@ -537,7 +691,7 @@ function frame(now) {
     // tabblad stond op de achtergrond: inhalen in grotere stappen
     if (S.speed > 0) {
       const r = L.simulate(dtMs);
-      if (dtMs > 60000 && (r.deliveries || Math.abs(r.money) > 1)) toast(`Bijgewerkt: ${r.deliveries} leveringen, ${r.money >= 0 ? '+' : ''}${fmtMoney(r.money)}`);
+      if (dtMs > 60000 && (r.deliveries || Math.abs(r.money) > 1)) ui.banner = { ...r, away: dtMs };
     }
   } else if (S.speed > 0) {
     let h = dtMs / L.GAME_HOUR_MS * S.speed;
@@ -546,37 +700,36 @@ function frame(now) {
 
   drawTrucks();
   updateTopbar();
+  if (ui.confirm && now > ui.confirm.until) { ui.confirm = null; ui.dirty = true; }
   if (now - lastSlow > 1000) { lastSlow = now; L.checkGoals(); renderEvents(); }
-  if (!pointerDown && ((dirty && now - lastPanel > 200) || now - lastPanel > 1000)) {
+  if (!ui.pointerDown && ((ui.dirty && now - lastPanel > 150) || now - lastPanel > 1000)) {
     renderPanel();
     lastPanel = now;
-    dirty = false;
+    ui.dirty = false;
   }
   if (Date.now() - lastSave > 10000) { L.save(); lastSave = Date.now(); }
   requestAnimationFrame(frame);
 }
 
 export function start() {
-  hooks.changed = () => { dirty = true; };
+  hooks.changed = () => { ui.dirty = true; };
   hooks.toast = toast;
   hooks.float = floatText;
   hooks.events = renderEvents;
-  hooks.cities = () => { renderCities(); dirty = true; };
+  hooks.cities = () => { renderCities(); ui.dirty = true; };
 
   renderMap();
-  let welcome = null;
   if (L.load()) {
     const away = Date.now() - S.savedAt;
     if (away > 10000 && S.speed > 0) {
       const r = L.simulate(away);
-      if (r.deliveries || Math.abs(r.money) > 1) welcome = () => showWelcomeBack(r, away);
+      if (r.deliveries || Math.abs(r.money) > 1) ui.banner = { ...r, away };
     }
   } else {
     L.newGame();
   }
   renderCities();
   renderEvents();
-  if (!S.introSeen) { S.introSeen = true; showIntro(); } else if (welcome) welcome();
   bindInput();
   L.save();
   requestAnimationFrame(frame);

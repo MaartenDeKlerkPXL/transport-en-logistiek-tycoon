@@ -13,7 +13,7 @@ export const CITIES = {
   hasselt:   { name: 'Hasselt',   country: 'BE', lat: 50.93, lon: 5.34, lp: 'r', cargo: { koel: 3, pallets: 2, pakketten: 1 } },
   luik:      { name: 'Luik',      country: 'BE', lat: 50.63, lon: 5.57, lp: 'r', cargo: { bulk: 3, pakketten: 3, pallets: 1 } },
   namen:     { name: 'Namen',     country: 'BE', lat: 50.47, lon: 4.87, lp: 'r', cargo: { bulk: 3, pallets: 2 } },
-  rotterdam: { name: 'Rotterdam', country: 'NL', lat: 51.92, lon: 4.48, port: true, lp: 'r', cargo: { containers: 5, adr: 3, pallets: 1 } },
+  rotterdam: { name: 'Rotterdam', country: 'NL', lat: 51.92, lon: 4.48, port: true, lp: 'l', cargo: { containers: 5, adr: 3, pallets: 1 } },
   amsterdam: { name: 'Amsterdam', country: 'NL', lat: 52.37, lon: 4.90, lp: 'r', cargo: { koel: 3, pakketten: 2, pallets: 1 } },
   eindhoven: { name: 'Eindhoven', country: 'NL', lat: 51.44, lon: 5.47, lp: 'r', cargo: { pakketten: 3, pallets: 2, adr: 1 } },
   lille:     { name: 'Rijsel',    country: 'FR', lat: 50.63, lon: 3.06, lp: 'l', cargo: { pallets: 3, pakketten: 1, koel: 1 } },
@@ -54,12 +54,12 @@ export const ROADS = [
 
 // Voertuigen. fuel = liter/100 km, wear = % slijtage per km, wage = chauffeursloon €/u.
 export const TRUCK_TYPES = {
-  bestel:    { name: 'Bestelwagen',      icon: '🚐', price: 9000,   capacity: 1.5, speed: 95, fuel: 9,  wear: 0.006,  wage: 20, cargo: ['pakketten'], level: 1, color: '#4fc3f7' },
-  bak:       { name: 'Bakwagen',         icon: '🚚', price: 22000,  capacity: 12,  speed: 85, fuel: 18, wear: 0.005,  wage: 24, cargo: ['pakketten', 'pallets'], level: 2, color: '#81c784' },
-  trekker:   { name: 'Trekker + huif',   icon: '🚛', price: 60000,  capacity: 24,  speed: 80, fuel: 29, wear: 0.0045, wage: 27, cargo: ['pallets', 'bulk'], level: 3, color: '#ffb74d' },
-  koel:      { name: 'Koeltrailer',      icon: '❄️', price: 75000,  capacity: 22,  speed: 80, fuel: 33, wear: 0.0045, wage: 28, cargo: ['koel', 'pallets'], level: 4, color: '#90caf9' },
-  container: { name: 'Containerchassis', icon: '🚢', price: 100000, capacity: 28,  speed: 78, fuel: 31, wear: 0.0045, wage: 28, cargo: ['containers'], level: 6, color: '#ce93d8' },
-  tank:      { name: 'Tankwagen (ADR)',  icon: '🛢️', price: 140000, capacity: 26,  speed: 75, fuel: 32, wear: 0.004,  wage: 34, cargo: ['adr'], level: 8, color: '#e57373' },
+  bestel:    { name: 'Bestelwagen',      icon: '🚐', price: 9000,   capacity: 1.5, speed: 95, fuel: 9,  wear: 0.006,  wage: 20, cargo: ['pakketten'], level: 1, color: '#0b6fb0' },
+  bak:       { name: 'Bakwagen',         icon: '🚚', price: 22000,  capacity: 12,  speed: 85, fuel: 18, wear: 0.005,  wage: 24, cargo: ['pakketten', 'pallets'], level: 2, color: '#2e7d32' },
+  trekker:   { name: 'Trekker + huif',   icon: '🚛', price: 60000,  capacity: 24,  speed: 80, fuel: 29, wear: 0.0045, wage: 27, cargo: ['pallets', 'bulk'], level: 3, color: '#c25100' },
+  koel:      { name: 'Koeltrailer',      icon: '❄️', price: 75000,  capacity: 22,  speed: 80, fuel: 33, wear: 0.0045, wage: 28, cargo: ['koel', 'pallets'], level: 4, color: '#00838f' },
+  container: { name: 'Containerchassis', icon: '🚢', price: 100000, capacity: 28,  speed: 78, fuel: 31, wear: 0.0045, wage: 28, cargo: ['containers'], level: 6, color: '#6a1b9a' },
+  tank:      { name: 'Tankwagen (ADR)',  icon: '🛢️', price: 140000, capacity: 26,  speed: 75, fuel: 32, wear: 0.004,  wage: 34, cargo: ['adr'], level: 8, color: '#c62828' },
 };
 
 // Vrachttypes. Vergoeding = (base + ton × km × rate). urgency = hoeveel speling op de deadline.

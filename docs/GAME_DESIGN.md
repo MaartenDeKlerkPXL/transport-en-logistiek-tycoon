@@ -29,7 +29,7 @@ Dat is de puzzel: **ketens van ritten bouwen** zodat je trucks altijd geladen ri
 | **Deadlines** | Te laat = maar 60% van de vergoeding en halve XP. | Spanning: neem je die verre rit nog aan? |
 | **Tachograaf** | Na 9 uur rijden moet een chauffeur verplicht rusten (met dubbele bemanning: 18 uur). | Realistisch en het maakt lange ritten interessant. |
 | **Pech** | Trucks met lage conditie krijgen pech: vertraging + takelkosten. | Onderhoud is geen formaliteit. |
-| **Gebeurtenissen** | Files rond een stad, havenstaking, dieselpiek, hittegolf (koelvracht +50%), Black Friday (pakketten +40%), flitsboetes, overheidspremies. | Elke speldag is anders; je moet reageren. |
+| **Gebeurtenissen** | Files rond een stad, havenstaking, dieselpiek, hittegolf (koelvracht +50%), Black Friday (pakketten +40%), bouwboom, overheidspremies. | Elke speldag is anders; je moet reageren. |
 | **Depots** | Een depot opent een stad + haar buren voor vracht en laat er nieuwe trucks leveren. Prijs verdubbelt per depot. | De grote strategische keuze: waar breid je uit? |
 | **Bedrijf (upgrades)** | Planningsafdeling (automatisch dispatchen, ook offline), eco-rijtraining, eigen werkplaats, Track & Trace, premium vrachtbeurs, dubbele bemanning, telematica. | Van zelf alles klikken naar een idle-imperium dat doordraait. |
 | **Doelen** | 12 mijlpalen met geldbeloning, van "lever 5 vrachten af" tot "bedrijfswaarde € 2 miljoen". | Altijd een duidelijk volgend doel. |
@@ -59,6 +59,8 @@ Alle balansgetallen staan in [`js/data.js`](../js/data.js).
 - [x] 6 trucktypes, onderhoud, verkopen, pech, tachograafrust
 - [x] Dieselprijs, gebeurtenissen, depots, 7 upgrades, 12 doelen, niveaus
 - [x] Automatisch opslaan, offline voortgang, snelheid ⏸/1×/2×/4× (toetsen P/1/2/3)
+- [x] Rit annuleren zolang de truck nog leeg onderweg is, winst per dag in de topbalk
+- [x] Geen pop-ups: alles klapt open in het paneel; toegankelijk (WCAG AA, toetsenbord)
 - [x] Werkt op desktop en gsm
 - [x] Unit tests + browsertest, automatisch live via GitHub Pages
 
@@ -75,7 +77,6 @@ Alle balansgetallen staan in [`js/data.js`](../js/data.js).
 - Europa uitbreiden: Hamburg, Milaan, Barcelona, Warschau (ferry naar het VK via Zeebrugge?)
 - Dag/nacht en weer op de kaart (sneeuw = trager, mist op de E40)
 - Geluid: claxon bij een levering, motorgeluid, radiojingle bij gebeurtenissen
-- **Zelf rijden** in de stijl van Agro Tycoon: op een stadskaart zelf een truck besturen en aanmeren aan een laadkade
 
 **Cross-over met Agro Tycoon** 🚜➡️🚛
 - Oogst uit Agro Tycoon verschijnt als vracht in Vrachtbaas (graan naar de haven, aardappelen naar de chipsfabriek): één gedeelde "Tycoon"-wereld

@@ -5,54 +5,63 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Vrachtbaas · Transport &amp; Logistiek Tycoon</title>
   <meta name="description" content="Bouw je eigen transportbedrijf uit van één bestelwagen tot een logistiek imperium in de Benelux.">
-  <meta name="theme-color" content="#151a22">
+  <meta name="theme-color" content="#1d4f9a">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%9A%9B%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;800&display=swap">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="logo">🚛</span><div><b>Vrachtbaas</b><small>Transport &amp; Logistiek Tycoon</small></div></div>
-    <div class="stats">
-      <div class="stat"><small>Kapitaal</small><b id="st-money">€ 0</b></div>
-      <div class="stat level"><small>Niveau <span id="st-level">1</span></small><div class="xpbar"><i id="st-xp"></i></div></div>
-      <div class="stat"><small>Tijd</small><b id="st-clock">Dag 1</b></div>
-      <div class="stat"><small>Diesel</small><b id="st-diesel">€ 1,75/L</b></div>
+    <div class="brand">
+      <span class="brand-sign" aria-hidden="true">V</span>
+      <div><b>Vrachtbaas</b><small>Transport &amp; Logistiek</small></div>
     </div>
+    <dl class="stats">
+      <div class="stat money"><dt>Kapitaal</dt><dd id="st-money">€ 0</dd></div>
+      <div class="stat"><dt>Winst per dag</dt><dd id="st-profit">—</dd></div>
+      <div class="stat level">
+        <dt>Niveau <span id="st-level">1</span></dt>
+        <dd><span class="xpbar" role="progressbar" aria-label="Ervaring tot het volgende niveau" aria-valuemin="0" aria-valuemax="100" id="st-xpbar"><i id="st-xp"></i></span></dd>
+      </div>
+      <div class="stat"><dt>Tijd</dt><dd id="st-clock">Dag 1</dd></div>
+      <div class="stat"><dt>Diesel</dt><dd id="st-diesel">€ 1,75/L</dd></div>
+    </dl>
     <div class="speed" id="speed" role="group" aria-label="Spelsnelheid">
-      <button data-action="speed" data-speed="0" title="Pauze (P)">❚❚</button>
-      <button data-action="speed" data-speed="1" title="Normaal: 1 speldag = 1 minuut (toets 1)">1×</button>
-      <button data-action="speed" data-speed="2" title="2× zo snel (toets 2)">2×</button>
-      <button data-action="speed" data-speed="4" title="4× zo snel (toets 3)">4×</button>
+      <button type="button" data-action="speed" data-speed="0" aria-label="Pauze (P)" title="Pauze (P)"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="2.5" width="3.5" height="11" rx="1"/><rect x="9.5" y="2.5" width="3.5" height="11" rx="1"/></svg></button>
+      <button type="button" data-action="speed" data-speed="1" title="Normaal: 1 speldag per minuut (toets 1)">1×</button>
+      <button type="button" data-action="speed" data-speed="2" title="2× zo snel (toets 2)">2×</button>
+      <button type="button" data-action="speed" data-speed="4" title="4× zo snel (toets 3)">4×</button>
     </div>
   </header>
 
   <main class="layout">
-    <section class="map-wrap">
+    <section class="map-wrap" aria-label="Kaart">
       <div class="events" id="events" aria-live="polite"></div>
-      <svg id="map" role="img" aria-label="Kaart van de Benelux met je trucks en depots"></svg>
-      <div class="legend">
-        <span><i class="lg depot"></i>Depot</span>
-        <span><i class="lg net"></i>In netwerk</span>
-        <span><i class="lg off"></i>Buiten netwerk</span>
-        <span><i class="lg lg-empty"></i>Lege rit</span>
-        <span><i class="lg lg-loaded"></i>Geladen rit</span>
-      </div>
+      <svg id="map" role="group" aria-label="Kaart van de Benelux met je trucks en depots. Kies een stad voor details."></svg>
+      <ul class="legend" aria-label="Legende">
+        <li><i class="lg lg-depot"></i>Depot</li>
+        <li><i class="lg lg-net"></i>In je netwerk</li>
+        <li><i class="lg lg-off"></i>Buiten je netwerk</li>
+        <li><i class="lg lg-empty"></i>Lege rit</li>
+        <li><i class="lg lg-loaded"></i>Geladen rit</li>
+      </ul>
     </section>
 
-    <aside class="panel">
-      <div class="goal" id="goal"></div>
-      <nav class="tabs" id="tabs">
-        <button data-action="tab" data-tab="vracht">Vracht <span class="badge"></span></button>
-        <button data-action="tab" data-tab="vloot">Vloot <span class="badge"></span></button>
-        <button data-action="tab" data-tab="netwerk">Netwerk</button>
-        <button data-action="tab" data-tab="upgrades">Bedrijf</button>
-        <button data-action="tab" data-tab="logboek">Logboek</button>
+    <section class="panel" aria-label="Bedrijfsbeheer">
+      <div class="goal" id="goal" aria-live="polite"></div>
+      <nav class="tabs" id="tabs" aria-label="Onderdelen">
+        <button type="button" data-action="tab" data-tab="vracht">Vracht <span class="badge"></span></button>
+        <button type="button" data-action="tab" data-tab="vloot">Vloot <span class="badge"></span></button>
+        <button type="button" data-action="tab" data-tab="netwerk">Netwerk</button>
+        <button type="button" data-action="tab" data-tab="bedrijf">Bedrijf</button>
+        <button type="button" data-action="tab" data-tab="logboek">Logboek</button>
       </nav>
       <div class="tab-body" id="tab-body"></div>
-    </aside>
+    </section>
   </main>
 
-  <div class="modal-backdrop" id="modal" hidden><div class="modal" role="dialog" aria-modal="true"><div id="modal-content"></div></div></div>
-  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
   <script type="module" src="./js/index.js"></script>
 </body>
