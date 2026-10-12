@@ -1,0 +1,18 @@
+{
+  "name": "vrachtbaas",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vrachtbaas: een transport- en logistiek-tycoon voor in de browser",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "node tests/browser.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.56.1",
+    "vite": "^8.3.3"
+  }
+}
